@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "normalized-schema-generator"
+version = "0.1.0"
+description = "An anywidget for Microsoft Fabric notebooks that visually configures normalized schema JSON for Process Mining data import."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [{ name = "rosikm" }]
+keywords = ["anywidget", "jupyter", "widget", "fabric", "process-mining"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: Jupyter",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "anywidget>=0.9.0",
+    "traitlets>=5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/rosikm/normalized-schema-generator"
+Repository = "https://github.com/rosikm/normalized-schema-generator"
+Issues = "https://github.com/rosikm/normalized-schema-generator/issues"
+
+[tool.hatch.build]
+artifacts = ["src/normalized_schema_generator/*.js", "src/normalized_schema_generator/*.css"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/normalized_schema_generator"]

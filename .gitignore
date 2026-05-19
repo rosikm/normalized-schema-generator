@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.ipynb_checkpoints/
+.DS_Store
+*.pen
+.claude/
+_requirements/
+prompt.md
+normalized_schema_widget.py
+LocalTest.ipynb
