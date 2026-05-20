@@ -265,6 +265,9 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
     # Events→Cases FK relationship: {fk_column, pk_column, join_key_type}
     cases_relationship = traitlets.Dict({}).tag(sync=True)
 
+    # Attribute mapping
+    attributes_config = traitlets.List([]).tag(sync=True)
+
     # Communication & output
     fetch_columns_request = traitlets.Unicode("").tag(sync=True)
     fetch_columns_response = traitlets.List([]).tag(sync=True)
@@ -409,6 +412,11 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
     def _on_data_change(self, change):
         self._generate_config()
 
+    @traitlets.observe("attributes_config")
+    def _on_attributes_change(self, change):
+        # Only regenerate JSON, don't re-sync attributes (avoid loop)
+        self._generate_config(sync_attributes=False)
+
     # ── JSON generation ──────────────────────────────────
 
     def _find_table_path(self, table_name):
@@ -417,13 +425,36 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
                 return t["path"]
         return ""
 
-    def _generate_config(self):
+    @staticmethod
+    def _dataset_name(table_name):
+        """Extract a clean dataset name: strip path and file extension."""
+        import posixpath
+        base = posixpath.basename(table_name)
+        # Remove known extensions (.csv, .parquet, .snappy.parquet)
+        for ext in (".snappy.parquet", ".parquet", ".csv"):
+            if base.lower().endswith(ext):
+                base = base[: -len(ext)]
+                break
+        return base
+
+    @staticmethod
+    def _dtype_to_source_data_type(dtype):
+        return {
+            "int": "Integer",
+            "double": "Float",
+            "string": "String",
+            "timestamp": "Date",
+            "boolean": "Boolean",
+        }.get(dtype, "String")
+
+    def _generate_config(self, sync_attributes=True):
         self.error_message = ""
         if not self.selected_lakehouse_id or not self.events_table_name:
             self.config_json = ""
             return
 
         try:
+            dn = self._dataset_name
             datasets = []
             join_dataset_names = set()
 
@@ -446,19 +477,18 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
                 if c.get("included") and c["name"] not in events_fk_cols
             ]
             events_join_arr = []
-            # Add the Events→Cases join first
             if has_cases_rel:
                 events_join_arr.append({
                     "SourceColumnName": cases_rel["fk_column"],
                     "TargetColumnName": cases_rel["pk_column"],
-                    "TargetDatasetName": self.cases_table_name,
+                    "TargetDatasetName": dn(self.cases_table_name),
                     "JoinKeyType": cases_rel.get("join_key_type", "Integer"),
                 })
             for j in self.events_joins:
                 entry = {
                     "SourceColumnName": j["source_column"],
                     "TargetColumnName": j["target_column"],
-                    "TargetDatasetName": j["target_table"],
+                    "TargetDatasetName": dn(j["target_table"]),
                     "JoinKeyType": j["join_key_type"],
                 }
                 if j.get("export_name"):
@@ -468,11 +498,18 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
 
             datasets.append({
                 "Kind": 0,
-                "Name": self.events_table_name,
+                "Name": dn(self.events_table_name),
                 "Path": self._find_table_path(self.events_table_name),
                 "Columns": events_columns,
                 "Join": events_join_arr if events_join_arr else None,
             })
+
+            # Collect attribute names + dtypes + level for Attributes section
+            # {col_name: {dtype, level}}
+            attr_info = {}
+            for c in self.events_columns:
+                if c.get("included") and c["name"] not in events_fk_cols:
+                    attr_info[c["name"]] = {"dtype": c["dtype"], "level": "Event"}
 
             # ── Cases dataset (Kind=1) ──
             if self.cases_enabled and self.cases_table_name:
@@ -487,7 +524,7 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
                     entry = {
                         "SourceColumnName": j["source_column"],
                         "TargetColumnName": j["target_column"],
-                        "TargetDatasetName": j["target_table"],
+                        "TargetDatasetName": dn(j["target_table"]),
                         "JoinKeyType": j["join_key_type"],
                     }
                     if j.get("export_name"):
@@ -497,11 +534,15 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
 
                 datasets.append({
                     "Kind": 1,
-                    "Name": self.cases_table_name,
+                    "Name": dn(self.cases_table_name),
                     "Path": self._find_table_path(self.cases_table_name),
                     "Columns": cases_columns,
                     "Join": cases_join_arr if cases_join_arr else None,
                 })
+
+                for c in self.cases_columns:
+                    if c.get("included") and c["name"] not in cases_fk_cols:
+                        attr_info[c["name"]] = {"dtype": c["dtype"], "level": "Case"}
 
             # ── Join datasets (Kind=2) ──
             join_table_cols = {}
@@ -524,11 +565,63 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
                 ]
                 datasets.append({
                     "Kind": 2,
-                    "Name": tname,
+                    "Name": dn(tname),
                     "Path": self._find_table_path(tname),
                     "Columns": join_cols,
                     "Join": None,
                 })
+                # Join target columns become Event-level attributes
+                for c in cols_map.values():
+                    if c.get("included"):
+                        attr_info[c["name"]] = {"dtype": c["dtype"], "level": "Event"}
+
+            # Join ExportNames also become attributes
+            for j in list(self.events_joins) + list(self.cases_joins):
+                if j.get("export_name"):
+                    attr_info[j["export_name"]] = {
+                        "dtype": "int",  # FK columns are typically int
+                        "level": "Event",
+                    }
+
+            # ── Sync attributes_config with current columns ──
+            if sync_attributes:
+                existing = {a["Name"]: a for a in self.attributes_config}
+                new_attrs = []
+                for col_name, info in attr_info.items():
+                    if col_name in existing:
+                        new_attrs.append(existing[col_name])
+                    else:
+                        new_attrs.append({
+                            "Name": col_name,
+                            "SourceDataType": self._dtype_to_source_data_type(info["dtype"]),
+                            "ImportType": "Other",
+                            "Level": info["level"],
+                            "FinanceImportType": "None",
+                            "CaseLevelAttributeHandling": "None",
+                            "IsDisplayAttribute": False,
+                            "IsExcluded": False,
+                            "DefaultValue": "",
+                        })
+                if new_attrs != list(self.attributes_config):
+                    self.attributes_config = new_attrs
+
+            # ── Build Attributes for JSON from attributes_config ──
+            attrs_by_name = {a["Name"]: a for a in self.attributes_config}
+            attributes = []
+            for col_name in attr_info:
+                a = attrs_by_name.get(col_name)
+                if a:
+                    attributes.append({
+                        "Name": a["Name"],
+                        "SourceDataType": a.get("SourceDataType", "String"),
+                        "ImportType": a.get("ImportType", "Other"),
+                        "Level": a.get("Level", "Event"),
+                        "FinanceImportType": a.get("FinanceImportType", "None"),
+                        "CaseLevelAttributeHandling": a.get("CaseLevelAttributeHandling", "None"),
+                        "IsDisplayAttribute": a.get("IsDisplayAttribute", False),
+                        "IsExcluded": a.get("IsExcluded", False),
+                        "DefaultValue": a.get("DefaultValue", ""),
+                    })
 
             # ── Assemble full config ──
             config = {
@@ -548,7 +641,7 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
                         "datasets": datasets,
                     },
                     "miningMetadata": {
-                        "ImportConfiguration": {"Attributes": []},
+                        "ImportConfiguration": {"Attributes": attributes},
                         "Views": [],
                         "ProcessExtendedMetadata": {
                             "CalculatedMetrics": [],
