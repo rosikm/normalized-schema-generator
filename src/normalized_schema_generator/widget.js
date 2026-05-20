@@ -63,6 +63,7 @@ export function render({ model, el }) {
     eventsRef: { visible: false, editIndex: -1, targetTable: "", sourceCol: "", targetCol: "", keyType: "Integer", exportName: "", targetCols: [], loading: false },
     casesRef:  { visible: false, editIndex: -1, targetTable: "", sourceCol: "", targetCol: "", keyType: "Integer", exportName: "", targetCols: [], loading: false },
     pendingRefFor: null,
+    attrsOpen: false,
     outputOpen: true,
     copied: false,
   };
@@ -86,13 +87,17 @@ export function render({ model, el }) {
     root.appendChild(buildLakehouseCard());
     root.appendChild(buildEventsCard());
     root.appendChild(buildCasesCard());
+    root.appendChild(buildAttributesCard());
     root.appendChild(buildOutputCard());
   }
 
   /* ── header ──────────────────────────────────────────── */
   function buildHeader() {
     return h("div", { className: "nsw-header" },
-      h("h2", { textContent: "Normalized Schema Generator" }),
+      h("div", { style: "display:flex;align-items:baseline;gap:8px" },
+        h("h2", { textContent: "Normalized Schema Generator" }),
+        h("span", { className: "nsw-version", textContent: "v0.3.0" })
+      ),
       h("p", { textContent: "Configure your process mining star-schema and generate the dataSource JSON." })
     );
   }
@@ -106,6 +111,7 @@ export function render({ model, el }) {
 
     // Lakehouse selector
     const status = model.get("loading_status") || "";
+    const lhLoading = !!(status && (status.includes("tables") || status.includes("Reloading")));
     const lhOpts = lakehouses.map(l => ({ value: l.id, label: l.displayName }));
     const lhRow = h("div", { className: "nsw-row" },
       h("span", { className: "nsw-label", textContent: "Lakehouse" }),
@@ -114,9 +120,9 @@ export function render({ model, el }) {
         model.set("selected_lakehouse_id", val);
         model.set("selected_lakehouse_name", lh ? lh.displayName : "");
         model.save_changes();
-      }, "Select a lakehouse...")
+      }, "Select a lakehouse...", lhLoading)
     );
-    if (status && status.includes("tables")) {
+    if (lhLoading) {
       lhRow.appendChild(h("span", { className: "nsw-loading-inline", textContent: status }));
     }
     card.appendChild(lhRow);
@@ -333,6 +339,8 @@ export function render({ model, el }) {
 
     // Table selector
     const loadingStatus = model.get("loading_status") || "";
+    const isLoadingTables = loadingStatus.includes("tables") || loadingStatus.includes("Reloading");
+    const isLoadingCols = selTable && columns.length === 0 && loadingStatus.includes("columns");
     const tOpts = tables.map(t => ({ value: t.name, label: t.name }));
     const tblRow = h("div", { className: "nsw-row" },
       h("span", { className: "nsw-label", textContent: "Table" }),
@@ -341,9 +349,11 @@ export function render({ model, el }) {
         model.set("events_joins", []);
         model.save_changes();
         resetRefForm(S.eventsRef);
-      }, selLH ? "Select events table..." : "Select a lakehouse first", !selLH)
+      }, isLoadingTables ? "Loading tables..." : (selLH ? "Select events table..." : "Select a lakehouse first"), !selLH || isLoadingTables || isLoadingCols)
     );
-    if (selTable && columns.length === 0 && loadingStatus.includes("columns")) {
+    if (isLoadingTables) {
+      tblRow.appendChild(h("span", { className: "nsw-loading-inline", textContent: "" }));
+    } else if (isLoadingCols) {
       tblRow.appendChild(h("span", { className: "nsw-loading-inline", textContent: "Loading columns..." }));
     }
     card.appendChild(tblRow);
@@ -497,6 +507,8 @@ export function render({ model, el }) {
     const selLH = model.get("selected_lakehouse_id") || "";
 
     const casesLoadingStatus = model.get("loading_status") || "";
+    const casesLoadingTables = casesLoadingStatus.includes("tables") || casesLoadingStatus.includes("Reloading");
+    const casesLoadingCols = selTable && columns.length === 0 && casesLoadingStatus.includes("columns");
     const tOpts = tables.map(t => ({ value: t.name, label: t.name }));
     const casesTblRow = h("div", { className: "nsw-row" },
       h("span", { className: "nsw-label", textContent: "Table" }),
@@ -506,9 +518,11 @@ export function render({ model, el }) {
         model.set("cases_relationship", {});
         model.save_changes();
         resetRefForm(S.casesRef);
-      }, selLH ? "Select cases table..." : "Select a lakehouse first", !selLH)
+      }, casesLoadingTables ? "Loading tables..." : (selLH ? "Select cases table..." : "Select a lakehouse first"), !selLH || casesLoadingTables || casesLoadingCols)
     );
-    if (selTable && columns.length === 0 && casesLoadingStatus.includes("columns")) {
+    if (casesLoadingTables) {
+      casesTblRow.appendChild(h("span", { className: "nsw-loading-inline", textContent: "" }));
+    } else if (casesLoadingCols) {
       casesTblRow.appendChild(h("span", { className: "nsw-loading-inline", textContent: "Loading columns..." }));
     }
     card.appendChild(casesTblRow);
@@ -564,7 +578,125 @@ export function render({ model, el }) {
     return card;
   }
 
-  /* ── Section D: JSON output ──────────────────────────── */
+  /* ── SVG icons for attribute types (16x16 viewBox) ──── */
+  const ICONS = {
+    caseid: '<svg viewBox="0 0 16 16"><path d="M10 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a2 2 0 0 1 2 2v.27c.6.34 1 .99 1 1.73a2 2 0 0 1-4 0c0-.74.4-1.39 1-1.73V9a1 1 0 0 0-1-1H6a1 1 0 0 0-1 1v.27c.6.34 1 .99 1 1.73a2 2 0 0 1-4 0c0-.74.4-1.39 1-1.73V9a2 2 0 0 1 2-2h1V5.73C5.4 5.39 5 4.74 5 4a2 2 0 0 1 2-2"/><circle cx="10" cy="4" r="1"/><circle cx="6" cy="11" r="1"/><circle cx="14" cy="11" r="1"/>',
+    activity: '<svg viewBox="0 0 16 16"><polygon points="5,2 14,8 5,14"/>',
+    start: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none"/><path d="M8 4v4l3 1.5"/>',
+    end: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none"/><path d="M5.5 8.5l2 2 3.5-4"/>',
+    resource: '<svg viewBox="0 0 16 16"><circle cx="8" cy="5" r="2.5" fill="none"/><path d="M3 14c0-2.8 2.2-5 5-5s5 2.2 5 5"/>',
+    evtattr: '<svg viewBox="0 0 16 16"><path d="M2 4h12M2 8h12M2 12h8"/>',
+    caseattr: '<svg viewBox="0 0 16 16"><path d="M2 3h5l1.5 2H14v8H2z"/>',
+    fin_evt: '<svg viewBox="0 0 16 16"><path d="M2 4h7M2 8h7M2 12h5"/><text x="13" y="10" text-anchor="middle" font-size="7" font-weight="700" fill="currentColor" stroke="none">$</text>',
+    fin_case: '<svg viewBox="0 0 16 16"><path d="M2 3h5l1.5 2H11v5H2z"/><text x="14" y="12" text-anchor="middle" font-size="7" font-weight="700" fill="currentColor" stroke="none">$</text>',
+    fin_res: '<svg viewBox="0 0 16 16"><circle cx="6" cy="5" r="2.5" fill="none"/><path d="M1 14c0-2.8 2.2-5 5-5s5 2.2 5 5"/><text x="14" y="7" text-anchor="middle" font-size="7" font-weight="700" fill="currentColor" stroke="none">$</text>',
+  };
+
+  /* Attribute type definitions: key, icon, tooltip, ImportType, Level, FinanceImportType */
+  const ATTR_TYPES = [
+    { key: "caseid",   icon: ICONS.caseid,   tip: "Case ID",              it: "Case",     lv: "Event", fi: "None" },
+    { key: "activity", icon: ICONS.activity,  tip: "Activity",             it: "Activity",  lv: "Event", fi: "None" },
+    { key: "start",    icon: ICONS.start,     tip: "Start timestamp",      it: "Start",     lv: "Event", fi: "None" },
+    { key: "end",      icon: ICONS.end,       tip: "End timestamp",        it: "End",       lv: "Event", fi: "None" },
+    { key: "resource", icon: ICONS.resource,  tip: "Resource",             it: "Resource",  lv: "Event", fi: "None" },
+    { key: "evtattr",  icon: ICONS.evtattr,   tip: "Event-level attribute",it: "Other",     lv: "Event", fi: "None" },
+    { key: "caseattr", icon: ICONS.caseattr,  tip: "Case-level attribute", it: "Other",     lv: "Case",  fi: "None" },
+    { key: "fin_evt",  icon: ICONS.fin_evt,   tip: "Finance per event",    it: "Other",     lv: "Event", fi: "PerEvent" },
+    { key: "fin_case", icon: ICONS.fin_case,  tip: "Finance per case",     it: "Other",     lv: "Case",  fi: "PerCase" },
+    { key: "fin_res",  icon: ICONS.fin_res,   tip: "Finance per resource", it: "Other",     lv: "Event", fi: "PerResource" },
+  ];
+
+  function attrTypeKey(a) {
+    for (const t of ATTR_TYPES) {
+      if (t.it === a.ImportType && t.lv === a.Level && t.fi === a.FinanceImportType) return t.key;
+    }
+    return "evtattr";
+  }
+
+  const DTYPES = [
+    { key: "String",  label: "STR",  cls: "t-str" },
+    { key: "Integer", label: "INT",  cls: "t-int" },
+    { key: "Float",   label: "FLT",  cls: "t-flt" },
+    { key: "Date",    label: "DATE", cls: "t-date" },
+    { key: "Boolean", label: "BOOL", cls: "t-bool" },
+  ];
+
+  /* ── Section D: Attribute Mapping ────────────────────── */
+  function buildAttributesCard() {
+    const attrs = model.get("attributes_config") || [];
+    if (attrs.length === 0) return h("div", null);
+
+    const card = h("div", { className: "nsw-card attrs" });
+
+    const toggleBtn = h("button", { className: "nsw-collapse-btn", onClick: () => { S.attrsOpen = !S.attrsOpen; rebuild(); } },
+      h("span", { className: "arrow " + (S.attrsOpen ? "open" : ""), textContent: "▶" }),
+      h("span", { textContent: "Attribute Mapping" }),
+      h("span", { style: "font-weight:400;color:var(--f-text3);font-size:12px;margin-left:4px", textContent: "(" + attrs.length + ")" })
+    );
+    card.appendChild(toggleBtn);
+
+    if (!S.attrsOpen) return card;
+
+    function updAttr(i, fields) {
+      const updated = JSON.parse(JSON.stringify(attrs));
+      Object.assign(updated[i], fields);
+      model.set("attributes_config", updated);
+      model.save_changes();
+    }
+
+    const list = h("div", { className: "nsw-attr-list" });
+    attrs.forEach((attr, i) => {
+      const curType = attrTypeKey(attr);
+      const isCaseLevel = attr.Level === "Case";
+
+      // Attribute type icon group
+      const typeGroup = h("div", { className: "nsw-icon-group" });
+      for (const t of ATTR_TYPES) {
+        const btn = h("button", {
+          className: "nsw-icon-btn" + (curType === t.key ? " active" : ""),
+          title: t.tip,
+          innerHTML: t.icon,
+          onClick: () => updAttr(i, { ImportType: t.it, Level: t.lv, FinanceImportType: t.fi })
+        });
+        typeGroup.appendChild(btn);
+      }
+
+      // First/Last toggle (always visible, disabled when not case-level)
+      const curFL = attr.CaseLevelAttributeHandling || "First";
+      const flGroup = h("div", { className: "nsw-fl-group" + (isCaseLevel ? "" : " disabled") });
+      for (const v of ["First", "Last"]) {
+        flGroup.appendChild(h("button", {
+          className: "nsw-fl-btn" + (isCaseLevel && curFL === v ? " active" : ""),
+          textContent: v,
+          onClick: isCaseLevel ? () => updAttr(i, { CaseLevelAttributeHandling: v }) : null
+        }));
+      }
+
+      // Data type pills
+      const dtGroup = h("div", { className: "nsw-dtype-group" });
+      const curDt = attr.SourceDataType || "String";
+      for (const d of DTYPES) {
+        dtGroup.appendChild(h("button", {
+          className: "nsw-dtype-btn " + d.cls + (curDt === d.key ? " active" : ""),
+          textContent: d.label,
+          onClick: () => updAttr(i, { SourceDataType: d.key })
+        }));
+      }
+
+      const row = h("div", { className: "nsw-attr-row" },
+        h("span", { className: "nsw-attr-name", textContent: attr.Name }),
+        typeGroup,
+        flGroup,
+        dtGroup
+      );
+      list.appendChild(row);
+    });
+
+    card.appendChild(list);
+    return card;
+  }
+
+  /* ── Section E: JSON output ──────────────────────────── */
   function buildOutputCard() {
     const card = h("div", { className: "nsw-card output" });
     const json = model.get("config_json") || "";
@@ -581,11 +713,12 @@ export function render({ model, el }) {
       } else {
         const wrap = h("div", { className: "nsw-json-wrap" });
         wrap.appendChild(h("div", { className: "nsw-json", textContent: json }));
+        const btnGroup = h("div", { className: "nsw-json-actions" });
         if (S.copied) {
-          wrap.appendChild(h("span", { className: "nsw-copy-btn nsw-copied", textContent: "Copied!" }));
+          btnGroup.appendChild(h("span", { className: "nsw-copied", textContent: "Copied!" }));
         } else {
-          wrap.appendChild(h("button", {
-            className: "nsw-btn outline nsw-copy-btn",
+          btnGroup.appendChild(h("button", {
+            className: "nsw-btn outline sm",
             textContent: "Copy",
             onClick: () => {
               navigator.clipboard.writeText(json).then(() => {
@@ -596,6 +729,20 @@ export function render({ model, el }) {
             }
           }));
         }
+        btnGroup.appendChild(h("button", {
+          className: "nsw-btn outline sm",
+          textContent: "Save",
+          onClick: () => {
+            const blob = new Blob([json], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "normalized_config.json";
+            a.click();
+            URL.revokeObjectURL(url);
+          }
+        }));
+        wrap.appendChild(btnGroup);
         card.appendChild(wrap);
       }
     }
@@ -612,7 +759,7 @@ export function render({ model, el }) {
     "lakehouses", "selected_lakehouse_id", "data_source_file_type",
     "available_tables", "events_table_name", "events_columns", "events_joins",
     "cases_enabled", "cases_table_name", "cases_columns", "cases_joins", "cases_relationship",
-    "config_json", "loading_status", "error_message"
+    "attributes_config", "config_json", "loading_status", "error_message"
   ];
   for (const t of watchedTraits) {
     model.on("change:" + t, rebuild);

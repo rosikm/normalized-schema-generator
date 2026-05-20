@@ -3,4 +3,4 @@
 from .widget import NormalizedSchemaWidget
 
 __all__ = ["NormalizedSchemaWidget"]
-__version__ = "0.2.0"
+__version__ = "0.3.0"
