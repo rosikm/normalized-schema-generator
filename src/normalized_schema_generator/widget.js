@@ -96,7 +96,7 @@ export function render({ model, el }) {
     return h("div", { className: "nsw-header" },
       h("div", { style: "display:flex;align-items:baseline;gap:8px" },
         h("h2", { textContent: "Normalized Schema Generator" }),
-        h("span", { className: "nsw-version", textContent: "v0.4.0" })
+        h("span", { className: "nsw-version", textContent: "v0.4.1" })
       ),
       h("p", { textContent: "Configure your process mining star-schema and generate the dataSource JSON." })
     );
@@ -117,8 +117,8 @@ export function render({ model, el }) {
       h("span", { className: "nsw-label", textContent: "Lakehouse" }),
       selectEl(lhOpts, selId, (val) => {
         const lh = lakehouses.find(l => l.id === val);
-        model.set("selected_lakehouse_id", val);
         model.set("selected_lakehouse_name", lh ? lh.displayName : "");
+        model.set("selected_lakehouse_id", val);
         model.save_changes();
       }, "Select a lakehouse...", lhLoading)
     );

@@ -18,6 +18,9 @@ For local development (outside Fabric), mock data is used automatically.
 
 import json
 import pathlib
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlencode
+from urllib.request import Request, urlopen
 
 import anywidget
 import traitlets
@@ -36,6 +39,11 @@ except ImportError:
     _lh_utils = None
     _runtime_utils = None
     _fs_utils = None
+
+try:
+    from notebookutils import credentials as _credentials_utils
+except ImportError:
+    _credentials_utils = None
 
 try:
     from pyspark.sql import SparkSession
@@ -116,49 +124,93 @@ def _quote_spark_identifier(identifier):
     return f"`{identifier.replace('`', '``')}`"
 
 
-def _row_value(row, *names):
-    if hasattr(row, "asDict"):
-        row = row.asDict()
-    if isinstance(row, dict):
-        for name in names:
-            if name in row:
-                return row[name]
-        return None
-    for name in names:
-        if hasattr(row, name):
-            return getattr(row, name)
+def _onelake_metadata(lakehouse_id, resource, **params):
+    """Read catalog metadata independently of the notebook's Spark catalog."""
+    workspace_id = _get_fabric_context()["workspace_id"]
+    if not workspace_id:
+        raise RuntimeError("The current Fabric workspace ID is unavailable.")
+    if _credentials_utils is None:
+        raise RuntimeError("NotebookUtils credentials are required for OneLake metadata.")
+    token = _credentials_utils.getToken("storage")
+    if not token:
+        raise RuntimeError("NotebookUtils did not return a OneLake access token.")
+    base_url = (
+        "https://onelake.table.fabric.microsoft.com/delta/"
+        f"{quote(workspace_id, safe='')}/{quote(lakehouse_id, safe='')}"
+        "/api/2.1/unity-catalog/"
+    )
+    query = urlencode({"catalog_name": lakehouse_id, **params})
+    request = Request(base_url + resource + "?" + query, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    })
     try:
-        return row[0]
-    except (IndexError, KeyError, TypeError):
-        return None
+        with urlopen(request, timeout=30) as response:
+            payload = json.load(response)
+    except HTTPError as exc:
+        raise RuntimeError(
+            f"OneLake metadata request failed (HTTP {exc.code}). "
+            "Check lakehouse access and OneLake permissions."
+        ) from None
+    except URLError:
+        raise RuntimeError("Unable to connect to the OneLake metadata API.") from None
+    if not isinstance(payload, dict):
+        raise RuntimeError("The OneLake metadata API returned an invalid response.")
+    return payload
 
 
-def _list_schema_tables(lakehouse_name, lakehouse_id):
-    """Discover tables via Spark for schema-enabled lakehouses."""
-    if _spark is None:
-        return []
+def _onelake_items(lakehouse_id, resource, **params):
+    page_token = None
+    seen_tokens = set()
+    while True:
+        query = dict(params)
+        if page_token:
+            query["page_token"] = page_token
+        payload = _onelake_metadata(lakehouse_id, resource, **query)
+        items = payload.get(resource)
+        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+            raise RuntimeError(f"The OneLake metadata API returned invalid {resource}.")
+        yield from items
+        page_token = payload.get("next_page_token")
+        if not page_token:
+            break
+        if not isinstance(page_token, str) or page_token in seen_tokens:
+            raise RuntimeError("The OneLake metadata API returned an invalid page token.")
+        seen_tokens.add(page_token)
 
-    lakehouse = _quote_spark_identifier(lakehouse_name)
-    schemas = _spark.sql(f"SHOW SCHEMAS IN {lakehouse}").collect()
+
+def _list_schema_tables(lakehouse_id):
     results = []
-    for row in schemas:
-        schema = _row_value(row, "namespace", "databaseName", "schemaName")
-        if not schema:
-            continue
-        schema_identifier = _quote_spark_identifier(schema)
-        tables = _spark.sql(
-            f"SHOW TABLES IN {lakehouse}.{schema_identifier}"
-        ).collect()
-        for table_row in tables:
-            table_name = _row_value(table_row, "tableName", "table_name", "name")
-            if not table_name:
-                continue
+    for schema in _onelake_items(lakehouse_id, "schemas"):
+        schema_name = schema["name"]
+        for table in _onelake_items(lakehouse_id, "tables", schema_name=schema_name):
+            table_name = table["name"]
             results.append({
-                "name": f"{schema}.{table_name}",
-                "path": f"/{lakehouse_id}/Tables/{schema}/{table_name}",
+                "name": f"{schema_name}.{table_name}",
+                "path": f"/{lakehouse_id}/Tables/{schema_name}/{table_name}",
                 "type": "delta",
             })
     return results
+
+
+def _get_schema_columns(table_name, lakehouse_id):
+    schema, name = table_name.split(".", 1)
+    full_name = quote(f"{lakehouse_id}.{schema}.{name}", safe="")
+    table = _onelake_metadata(
+        lakehouse_id, f"tables/{full_name}", schema_name=schema
+    )
+    columns = table.get("columns")
+    if not isinstance(columns, list):
+        raise RuntimeError("The OneLake metadata API did not return table columns.")
+    return [
+        {
+            "name": column["name"],
+            "dtype": _spark_type_to_simple(
+                column.get("type_text") or column["type_name"]
+            ),
+        }
+        for column in columns
+    ]
 
 
 def _list_tables(lakehouse_name, lakehouse_id, file_type):
@@ -188,13 +240,7 @@ def _list_tables(lakehouse_name, lakehouse_id, file_type):
                     })
                 return results
 
-            schema_tables = _list_schema_tables(lakehouse_name, lakehouse_id)
-            if schema_tables or tables == []:
-                return schema_tables
-            raise RuntimeError(
-                f"Unable to list tables in lakehouse {lakehouse_name!r}; "
-                "NotebookUtils listing failed and Spark catalog discovery is unavailable."
-            )
+            return _list_schema_tables(lakehouse_id)
         return _list_files_recursive("Files", lakehouse_id, file_type)
     # Mock data
     if file_type == 2:
@@ -239,33 +285,32 @@ def _spark_type_to_simple(dtype_str):
 
 
 def _get_columns(table_name, lakehouse_name, lakehouse_id, file_type):
+    if FABRIC_AVAILABLE and file_type == 2 and "." in table_name:
+        return _get_schema_columns(table_name, lakehouse_id)
+    if FABRIC_AVAILABLE and _spark is None:
+        raise RuntimeError("Spark is required to load columns for this source.")
     if FABRIC_AVAILABLE and _spark:
-        try:
-            if file_type == 2:
-                name_parts = table_name.split(".", 1)
-                identifiers = [lakehouse_name, *name_parts]
-                full_name = ".".join(
-                    _quote_spark_identifier(part) for part in identifiers
-                )
-                df = _spark.sql(f"DESCRIBE TABLE {full_name}")
-                rows = df.collect()
-                return [
-                    {"name": r["col_name"], "dtype": _spark_type_to_simple(r["data_type"])}
-                    for r in rows
-                    if r["col_name"] and not r["col_name"].startswith("#")
-                ]
+        if file_type == 2:
+            full_name = ".".join(
+                _quote_spark_identifier(part) for part in (lakehouse_name, table_name)
+            )
+            df = _spark.sql(f"DESCRIBE TABLE {full_name}")
+            rows = df.collect()
+            return [
+                {"name": r["col_name"], "dtype": _spark_type_to_simple(r["data_type"])}
+                for r in rows
+                if r["col_name"] and not r["col_name"].startswith("#")
+            ]
+        else:
+            base = f"Files/{table_name}"
+            if file_type == 0:
+                df = _spark.read.option("header", "true").option("inferSchema", "true").csv(base)
             else:
-                base = f"Files/{table_name}"
-                if file_type == 0:
-                    df = _spark.read.option("header", "true").option("inferSchema", "true").csv(base)
-                else:
-                    df = _spark.read.parquet(base)
-                return [
-                    {"name": f.name, "dtype": _spark_type_to_simple(f.dataType.simpleString())}
-                    for f in df.schema.fields
-                ]
-        except Exception:
-            return []
+                df = _spark.read.parquet(base)
+            return [
+                {"name": f.name, "dtype": _spark_type_to_simple(f.dataType.simpleString())}
+                for f in df.schema.fields
+            ]
     # Mock data
     _mock = {
         "events": [
@@ -345,6 +390,7 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
     config_json = traitlets.Unicode("").tag(sync=True)
     loading_status = traitlets.Unicode("").tag(sync=True)
     error_message = traitlets.Unicode("").tag(sync=True)
+    _data_error = traitlets.Unicode("")
 
     # Fabric context
     workspace_id = traitlets.Unicode("").tag(sync=True)
@@ -361,10 +407,17 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
 
     @traitlets.observe("selected_lakehouse_id")
     def _on_lakehouse_change(self, change):
+        self._data_error = ""
+        self.error_message = ""
         lh_id = change["new"]
         if not lh_id:
             self.available_tables = []
+            self.config_json = ""
             return
+        for lakehouse in self.lakehouses:
+            if lakehouse["id"] == lh_id:
+                self.selected_lakehouse_name = lakehouse["displayName"]
+                break
         self.loading_status = "Loading tables..."
         self.events_table_name = ""
         self.events_columns = []
@@ -378,8 +431,8 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
                 self.selected_lakehouse_name, lh_id, self.data_source_file_type
             )
         except Exception as e:
-            self.error_message = f"Failed to load tables: {e}"
             self.available_tables = []
+            self._data_error = f"Failed to load tables: {e}"
         self.loading_status = ""
         self._generate_config()
 
@@ -387,6 +440,8 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
     def _on_file_type_change(self, change):
         if not self.selected_lakehouse_id:
             return
+        self._data_error = ""
+        self.error_message = ""
         self.loading_status = "Reloading tables..."
         self.events_table_name = ""
         self.events_columns = []
@@ -402,13 +457,15 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
                 change["new"],
             )
         except Exception as e:
-            self.error_message = f"Failed to load tables: {e}"
             self.available_tables = []
+            self._data_error = f"Failed to load tables: {e}"
         self.loading_status = ""
         self._generate_config()
 
     @traitlets.observe("events_table_name")
     def _on_events_table_change(self, change):
+        self._data_error = ""
+        self.error_message = ""
         name = change["new"]
         if not name:
             self.events_columns = []
@@ -425,13 +482,15 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
                 for c in raw
             ]
         except Exception as e:
-            self.error_message = f"Failed to load columns: {e}"
             self.events_columns = []
+            self._data_error = f"Failed to load columns: {e}"
         self.loading_status = ""
         self._generate_config()
 
     @traitlets.observe("cases_table_name")
     def _on_cases_table_change(self, change):
+        self._data_error = ""
+        self.error_message = ""
         name = change["new"]
         if not name:
             self.cases_columns = []
@@ -450,8 +509,8 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
                 for c in raw
             ]
         except Exception as e:
-            self.error_message = f"Failed to load columns: {e}"
             self.cases_columns = []
+            self._data_error = f"Failed to load columns: {e}"
         self.loading_status = ""
         self._generate_config()
 
@@ -465,6 +524,8 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
         if len(parts) < 2:
             return
         table_name = parts[1]
+        self._data_error = ""
+        self.error_message = ""
         try:
             raw = _get_columns(
                 table_name, self.selected_lakehouse_name,
@@ -475,8 +536,9 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
                 for c in raw
             ]
         except Exception as e:
-            self.error_message = f"Failed to load columns for {table_name}: {e}"
             self.fetch_columns_response = []
+            self._data_error = f"Failed to load columns for {table_name}: {e}"
+        self._generate_config()
 
     @traitlets.observe("events_columns", "events_joins", "cases_enabled",
                        "cases_columns", "cases_joins", "cases_relationship")
@@ -519,8 +581,8 @@ class NormalizedSchemaWidget(anywidget.AnyWidget):
         }.get(dtype, "String")
 
     def _generate_config(self, sync_attributes=True):
-        self.error_message = ""
-        if not self.selected_lakehouse_id or not self.events_table_name:
+        self.error_message = self._data_error
+        if self._data_error or not self.selected_lakehouse_id or not self.events_table_name:
             self.config_json = ""
             return
 

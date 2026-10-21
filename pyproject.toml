@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "normalized-schema-generator"
-version = "0.4.0"
+version = "0.4.1"
 description = "An anywidget for Microsoft Fabric notebooks that visually configures normalized schema JSON for Process Mining data import."
 readme = "README.md"
 license = {text = "MIT"}

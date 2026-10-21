@@ -23,6 +23,14 @@ w
 
 The widget auto-detects the Fabric environment and populates lakehouses, tables, and columns using `notebookutils` and Spark.
 
+For schema-enabled lakehouses, it uses the [OneLake Delta metadata API](https://learn.microsoft.com/fabric/onelake/table-apis/delta-table-apis-overview)
+to discover schemas, tables, and columns. This works even when the notebook's
+default lakehouse uses the legacy Spark catalog. Authentication uses the current
+notebook identity via `notebookutils.credentials.getToken("storage")`; no extra
+credentials are required. That identity must have permission to read the selected
+lakehouse's tables. Discovery errors are shown in the widget instead of appearing
+as an empty table list.
+
 After configuring your schema, retrieve the generated JSON:
 
 ```python
