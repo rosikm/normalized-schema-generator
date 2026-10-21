@@ -4,10 +4,10 @@ An [anywidget](https://anywidget.dev)-based Jupyter widget for **Microsoft Fabri
 
 Replaces manual JSON authoring by providing dropdowns, toggles, and inline forms to select lakehouses, tables, columns, and FK/PK relationships, then auto-generates the `dataSource` section of the config.
 
-## Install
+## Install in Fabric notebook
 
-```bash
-pip install normalized-schema-generator
+```python
+%pip install --upgrade normalized-schema-generator
 ```
 
 ## Usage
@@ -22,6 +22,14 @@ w
 ```
 
 The widget auto-detects the Fabric environment and populates lakehouses, tables, and columns using `notebookutils` and Spark.
+
+For schema-enabled lakehouses, it uses the [OneLake Delta metadata API](https://learn.microsoft.com/fabric/onelake/table-apis/delta-table-apis-overview)
+to discover schemas, tables, and columns. This works even when the notebook's
+default lakehouse uses the legacy Spark catalog. Authentication uses the current
+notebook identity via `notebookutils.credentials.getToken("storage")`; no extra
+credentials are required. That identity must have permission to read the selected
+lakehouse's tables. Discovery errors are shown in the widget instead of appearing
+as an empty table list.
 
 After configuring your schema, retrieve the generated JSON:
 
@@ -40,7 +48,7 @@ jupyter lab
 
 ## Features
 
-- **Lakehouse selection** from the current workspace
+- **Lakehouse selection** from the current workspace, including schema-enabled lakehouses
 - **Data source toggle**: Delta Tables or Files (CSV / Parquet)
 - **Events table** (required): column checklist with data type badges, include/exclude toggles
 - **Cases table** (optional): same column management, with required Events-to-Cases FK relationship
