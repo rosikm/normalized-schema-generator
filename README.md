@@ -40,7 +40,7 @@ jupyter lab
 
 ## Features
 
-- **Lakehouse selection** from the current workspace
+- **Lakehouse selection** from the current workspace, including schema-enabled lakehouses
 - **Data source toggle**: Delta Tables or Files (CSV / Parquet)
 - **Events table** (required): column checklist with data type badges, include/exclude toggles
 - **Cases table** (optional): same column management, with required Events-to-Cases FK relationship

@@ -112,23 +112,90 @@ def _list_files_recursive(base_path, lakehouse_id, file_type, prefix="", depth=0
     return results
 
 
+def _quote_spark_identifier(identifier):
+    return f"`{identifier.replace('`', '``')}`"
+
+
+def _row_value(row, *names):
+    if hasattr(row, "asDict"):
+        row = row.asDict()
+    if isinstance(row, dict):
+        for name in names:
+            if name in row:
+                return row[name]
+        return None
+    for name in names:
+        if hasattr(row, name):
+            return getattr(row, name)
+    try:
+        return row[0]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def _list_schema_tables(lakehouse_name, lakehouse_id):
+    """Discover tables via Spark for schema-enabled lakehouses."""
+    if _spark is None:
+        return []
+
+    lakehouse = _quote_spark_identifier(lakehouse_name)
+    schemas = _spark.sql(f"SHOW SCHEMAS IN {lakehouse}").collect()
+    results = []
+    for row in schemas:
+        schema = _row_value(row, "namespace", "databaseName", "schemaName")
+        if not schema:
+            continue
+        schema_identifier = _quote_spark_identifier(schema)
+        tables = _spark.sql(
+            f"SHOW TABLES IN {lakehouse}.{schema_identifier}"
+        ).collect()
+        for table_row in tables:
+            table_name = _row_value(table_row, "tableName", "table_name", "name")
+            if not table_name:
+                continue
+            results.append({
+                "name": f"{schema}.{table_name}",
+                "path": f"/{lakehouse_id}/Tables/{schema}/{table_name}",
+                "type": "delta",
+            })
+    return results
+
+
 def _list_tables(lakehouse_name, lakehouse_id, file_type):
     if FABRIC_AVAILABLE:
-        try:
-            if file_type == 2:
+        if file_type == 2:
+            try:
                 tables = _lh_utils.listTables(lakehouse_name)
-                return [
-                    {
-                        "name": t.name,
-                        "path": f"/{lakehouse_id}/Tables/dbo/{t.name}",
+            except Exception:
+                tables = None
+
+            if tables:
+                results = []
+                for table in tables:
+                    name = table.name
+                    schema = (
+                        getattr(table, "schemaName", None)
+                        or getattr(table, "schema", None)
+                    )
+                    if schema:
+                        name = f"{schema}.{name}"
+                    else:
+                        schema = "dbo"
+                    results.append({
+                        "name": name,
+                        "path": f"/{lakehouse_id}/Tables/{schema}/{table.name}",
                         "type": "delta",
-                    }
-                    for t in tables
-                ]
-            else:
-                return _list_files_recursive("Files", lakehouse_id, file_type)
-        except Exception:
-            return []
+                    })
+                return results
+
+            schema_tables = _list_schema_tables(lakehouse_name, lakehouse_id)
+            if schema_tables or tables == []:
+                return schema_tables
+            raise RuntimeError(
+                f"Unable to list tables in lakehouse {lakehouse_name!r}; "
+                "NotebookUtils listing failed and Spark catalog discovery is unavailable."
+            )
+        return _list_files_recursive("Files", lakehouse_id, file_type)
     # Mock data
     if file_type == 2:
         return [
@@ -175,7 +242,11 @@ def _get_columns(table_name, lakehouse_name, lakehouse_id, file_type):
     if FABRIC_AVAILABLE and _spark:
         try:
             if file_type == 2:
-                full_name = f"`{lakehouse_name}`.`{table_name}`"
+                name_parts = table_name.split(".", 1)
+                identifiers = [lakehouse_name, *name_parts]
+                full_name = ".".join(
+                    _quote_spark_identifier(part) for part in identifiers
+                )
                 df = _spark.sql(f"DESCRIBE TABLE {full_name}")
                 rows = df.collect()
                 return [

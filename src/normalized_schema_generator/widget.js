@@ -96,7 +96,7 @@ export function render({ model, el }) {
     return h("div", { className: "nsw-header" },
       h("div", { style: "display:flex;align-items:baseline;gap:8px" },
         h("h2", { textContent: "Normalized Schema Generator" }),
-        h("span", { className: "nsw-version", textContent: "v0.3.0" })
+        h("span", { className: "nsw-version", textContent: "v0.4.0" })
       ),
       h("p", { textContent: "Configure your process mining star-schema and generate the dataSource JSON." })
     );
