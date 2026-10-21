@@ -4,10 +4,10 @@ An [anywidget](https://anywidget.dev)-based Jupyter widget for **Microsoft Fabri
 
 Replaces manual JSON authoring by providing dropdowns, toggles, and inline forms to select lakehouses, tables, columns, and FK/PK relationships, then auto-generates the `dataSource` section of the config.
 
-## Install
+## Install in Fabric notebook
 
-```bash
-pip install normalized-schema-generator
+```python
+%pip install --upgrade normalized-schema-generator
 ```
 
 ## Usage
